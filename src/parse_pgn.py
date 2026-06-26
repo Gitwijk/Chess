@@ -55,6 +55,9 @@ def parse_file(pgn_path: Path) -> Path:
     else:
         raise OSError(f"Failed to read {pgn_path.name} after 5 attempts")
 
+    # Drop forfeit/aborted games with no moves.
+    rows = [row for row in rows if row["NumMoves"] > 0]
+
     df = pd.DataFrame(rows)
     tmp_path = part_path.with_suffix(".parquet.tmp")
     df.to_parquet(tmp_path, index=False)
