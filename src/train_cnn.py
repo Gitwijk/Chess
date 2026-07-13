@@ -1,4 +1,9 @@
-"""Train a small CNN to evaluate chess positions (predict outcome from the side-to-move's perspective)."""
+"""Train a CNN to evaluate chess positions (predict win probability for the side to move).
+
+DATA_DIR can point to either:
+  data/processed/evals/     — Stockfish-annotated positions (recommended)
+  data/processed/positions/ — game-outcome labels from PGN parsing
+"""
 
 from pathlib import Path
 
@@ -7,13 +12,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 
-POSITIONS_DIR = Path(__file__).resolve().parent.parent / "data" / "processed" / "positions"
-MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "position_eval_cnn.pt"
+_BASE = Path(__file__).resolve().parent.parent
+DATA_DIR = _BASE / "data" / "processed" / "evals"
+MODEL_PATH = _BASE / "models" / "position_eval_cnn.pt"
 
 
 def load_dataset():
     boards, labels = [], []
-    for npz_path in sorted(POSITIONS_DIR.glob("*.npz")):
+    for npz_path in sorted(DATA_DIR.glob("*.npz")):
         data = np.load(npz_path)
         if len(data["labels"]) == 0:
             continue
@@ -76,7 +82,7 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    print("Loading dataset...")
+    print(f"Loading dataset from {DATA_DIR.name}/...")
     boards, labels = load_dataset()
     print(f"{len(labels):,} positions loaded")
 
