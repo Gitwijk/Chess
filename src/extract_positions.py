@@ -20,7 +20,8 @@ DRIVE_DIR = Path("/Volumes/Google Drive/Data Science/Chess Data/Lichess/Lichess 
 LOCAL_RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "processed" / "positions"
 
-SAMPLE_RATE = 0.02  # ~2% of ~25M games -> ~500K positions
+SAMPLE_RATE = 0.02  # ~2% of ~25M games
+POSITIONS_PER_GAME = 3  # distinct random plies sampled per game -> ~1.5M positions total
 MIN_PLY, MAX_PLY = 10, 40
 RESULT_TO_SCORE = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}
 
@@ -73,17 +74,18 @@ def process_file(pgn_path: Path) -> Path:
                 if len(moves) < MIN_PLY + 1:
                     continue
 
-                ply = rng.randint(MIN_PLY, min(MAX_PLY, len(moves) - 1))
-                board = game.board()
-                for move in moves[:ply]:
-                    board.push(move)
+                max_ply = min(MAX_PLY, len(moves) - 1)
+                n_plies = min(POSITIONS_PER_GAME, max_ply - MIN_PLY + 1)
+                plies = sorted(rng.sample(range(MIN_PLY, max_ply + 1), n_plies))
 
                 score = RESULT_TO_SCORE[result]
-                if board.turn == chess.BLACK:
-                    score = 1.0 - score
-
-                boards.append(encode_board(board))
-                labels.append(score)
+                board = game.board()
+                for ply_idx, move in enumerate(moves[:max_ply], start=1):
+                    board.push(move)
+                    if ply_idx in plies:
+                        s = score if board.turn == chess.WHITE else 1.0 - score
+                        boards.append(encode_board(board))
+                        labels.append(s)
             break
         except OSError as e:
             print(f"  retry {pgn_path.name} (attempt {attempt + 1}): {e}", flush=True)
