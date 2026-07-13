@@ -34,24 +34,42 @@ class PositionDataset(Dataset):
         return self.boards[idx], self.labels[idx]
 
 
+class ResBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.BatchNorm2d(channels),
+        )
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        return self.relu(x + self.block(x))
+
+
 class PositionEvalCNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv = nn.Sequential(
+        self.stem = nn.Sequential(
             nn.Conv2d(12, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+        )
+        self.body = nn.Sequential(
+            ResBlock(128), ResBlock(128), ResBlock(128),
         )
         self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(128 * 8 * 8, 256), nn.ReLU(),
+            nn.Linear(128, 64), nn.ReLU(),
             nn.Dropout(p=0.3),
-            nn.Linear(256, 1),
+            nn.Linear(64, 1),
         )
 
     def forward(self, x):
-        x = self.conv(x)
-        return self.head(x).squeeze(-1)
+        return self.head(self.body(self.stem(x))).squeeze(-1)
 
 
 def main():
@@ -75,7 +93,7 @@ def main():
     criterion = nn.BCEWithLogitsLoss()
 
     max_epochs = 20
-    patience = 3
+    patience = 5
     best_val_loss = float("inf")
     best_state = None
     epochs_without_improvement = 0
