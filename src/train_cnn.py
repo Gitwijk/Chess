@@ -30,14 +30,14 @@ def load_dataset():
 
 class PositionDataset(Dataset):
     def __init__(self, boards: np.ndarray, labels: np.ndarray):
-        self.boards = torch.from_numpy(boards).float()
+        self.boards = torch.from_numpy(boards)  # kept as int8 to save ~4× RAM
         self.labels = torch.from_numpy(labels).float()
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        return self.boards[idx], self.labels[idx]
+        return self.boards[idx].float(), self.labels[idx]
 
 
 class ResBlock(nn.Module):
