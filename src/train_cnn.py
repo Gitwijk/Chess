@@ -3,8 +3,11 @@
 DATA_DIR can point to either:
   data/processed/evals/     — Stockfish-annotated positions (recommended)
   data/processed/positions/ — game-outcome labels from PGN parsing
+
+Pass --resume to load the saved model and continue training (halved lr).
 """
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -79,6 +82,12 @@ class PositionEvalCNN(nn.Module):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--resume", action="store_true",
+                    help="Load saved model and continue training at half the learning rate")
+    ap.add_argument("--epochs", type=int, default=20, help="Number of epochs to train")
+    args = ap.parse_args()
+
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -95,10 +104,14 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=512, shuffle=False, num_workers=0)
 
     model = PositionEvalCNN().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    lr = 5e-5 if args.resume else 1e-4
+    if args.resume and MODEL_PATH.exists():
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
+        print(f"Resumed from {MODEL_PATH} (lr={lr})")
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
 
-    max_epochs = 20
+    max_epochs = args.epochs
     patience = 5
     best_val_loss = float("inf")
     best_state = None
