@@ -63,7 +63,7 @@ class PositionEvalCNN(nn.Module):
     def __init__(self):
         super().__init__()
         self.stem = nn.Sequential(
-            nn.Conv2d(12, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.Conv2d(17, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
         )
         self.body = nn.Sequential(

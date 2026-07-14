@@ -44,10 +44,20 @@ PIECE_TO_PLANE = {
 
 def encode_board(board: chess.Board) -> np.ndarray:
     b = board if board.turn == chess.WHITE else board.mirror()
-    planes = np.zeros((12, 8, 8), dtype=np.int8)
+    planes = np.zeros((17, 8, 8), dtype=np.int8)
+    # planes 0–11: piece positions (side-to-move perspective)
     for square, piece in b.piece_map().items():
         row, col = divmod(square, 8)
         planes[PIECE_TO_PLANE[(piece.piece_type, piece.color)], row, col] = 1
+    # planes 12–15: castling rights (side-to-move K/Q, opponent k/q)
+    if b.has_kingside_castling_rights(chess.WHITE):  planes[12] = 1
+    if b.has_queenside_castling_rights(chess.WHITE): planes[13] = 1
+    if b.has_kingside_castling_rights(chess.BLACK):  planes[14] = 1
+    if b.has_queenside_castling_rights(chess.BLACK): planes[15] = 1
+    # plane 16: en passant target square
+    if b.ep_square is not None:
+        row, col = divmod(b.ep_square, 8)
+        planes[16, row, col] = 1
     return planes
 
 
