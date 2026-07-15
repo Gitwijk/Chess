@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -38,14 +39,16 @@ OUT_PATH = _BASE / "data" / "processed" / "cheat_features.parquet"
 
 MIN_PLIES = 20          # skip very short games
 SKIP_OPENING_PLIES = 10  # opening theory moves match engines trivially
+STEM_RE = re.compile(r"^lichess_elite_\d{4}-\d{2}$")  # monthly files only, no merged dupes
 
 
 def pgn_files() -> list[Path]:
-    local = {p.stem: p for p in LOCAL_RAW_DIR.glob("lichess_elite_*.pgn")}
+    local = {p.stem: p for p in LOCAL_RAW_DIR.glob("lichess_elite_*.pgn")
+             if STEM_RE.match(p.stem)}
     drive = {}
     if DRIVE_DIR.exists():
         drive = {p.stem: p for p in DRIVE_DIR.glob("lichess_elite_*.pgn")
-                 if p.stem not in local}
+                 if STEM_RE.match(p.stem) and p.stem not in local}
     return sorted((local | drive).values())
 
 
@@ -158,16 +161,24 @@ def main():
     for pgn_path in reversed(pgn_files()):
         with open(pgn_path, encoding="utf-8", errors="replace") as f:
             while True:
-                game = chess.pgn.read_game(f)
-                if game is None:
+                # Fast path: parse headers only; movetext is skipped unless
+                # a labeled player is involved (~10× faster scanning).
+                offset = f.tell()
+                headers = chess.pgn.read_headers(f)
+                if headers is None:
                     break
                 n_scanned += 1
-                white = game.headers.get("White", "")
-                black = game.headers.get("Black", "")
+                white = headers.get("White", "")
+                black = headers.get("Black", "")
                 w_want = white in wanted and games_per_player[white] < args.max_games
                 b_want = black in wanted and games_per_player[black] < args.max_games
                 if not (w_want or b_want):
                     continue
+
+                f.seek(offset)
+                game = chess.pgn.read_game(f)
+                if game is None:
+                    break
 
                 feats = game_features(game, policy_net, value_net, device)
                 if feats is None:
