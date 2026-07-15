@@ -33,7 +33,7 @@ FEATURE_COLS = [
 def player_split(players: np.ndarray, test_frac: float = 0.2, seed: int = 42):
     """Split by player so no player appears in both train and test."""
     rng = np.random.default_rng(seed)
-    uniq = np.unique(players)
+    uniq = np.unique(np.asarray(players, dtype=str))
     rng.shuffle(uniq)
     n_test = int(len(uniq) * test_frac)
     test_players = set(uniq[:n_test])
@@ -67,8 +67,8 @@ def main():
         label=("label_tos", "first"),
         n_games=("top1_rate", "size"),
         **{f"{c}_mean": (c, "mean") for c in FEATURE_COLS},
+        **{f"{c}_std": (c, "std") for c in FEATURE_COLS},
         top1_rate_max=("top1_rate", "max"),
-        top1_rate_std=("top1_rate", "std"),
     ).fillna(0.0)
 
     feat_cols_p = [c for c in agg.columns if c not in ("label", )]
@@ -94,8 +94,8 @@ def main():
         bot_agg = bots.groupby("player").agg(
             n_games=("top1_rate", "size"),
             **{f"{c}_mean": (c, "mean") for c in FEATURE_COLS},
+            **{f"{c}_std": (c, "std") for c in FEATURE_COLS},
             top1_rate_max=("top1_rate", "max"),
-            top1_rate_std=("top1_rate", "std"),
         ).fillna(0.0)
         bot_scores = clf_p.predict_proba(bot_agg[feat_cols_p].values)[:, 1]
         human_scores = clf_p.predict_proba(Xp[te_m])[:, 1]
@@ -103,6 +103,17 @@ def main():
         print(f"  mean bot score   : {bot_scores.mean():.3f}")
         print(f"  mean human score : {human_scores[yp[te_m] == 0].mean():.3f}")
         print(f"  mean cheater score: {human_scores[yp[te_m] == 1].mean():.3f}")
+
+    # ---------------- Persist player-level model ----------------
+    import joblib
+    model_dir = _BASE / "models"
+    tmp_dir = model_dir / "_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_dir / "cheat_detector.joblib"
+    joblib.dump({"model": clf_p, "feature_cols": feat_cols_p}, tmp)
+    out = model_dir / "cheat_detector.joblib"
+    tmp.rename(out)
+    print(f"\nSaved player-level model to {out}")
 
     # ---------------- Feature importance (permutation on player level) ----
     from sklearn.inspection import permutation_importance
