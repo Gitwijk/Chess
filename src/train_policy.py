@@ -8,6 +8,7 @@ Usage:
     python src/train_policy.py --finetune         # warm-start backbone from value model
     python src/train_policy.py --resume           # continue from saved policy model
     python src/train_policy.py --epochs 30
+    python src/train_policy.py --max-positions 30000000
 """
 
 import argparse
@@ -23,17 +24,37 @@ DATA_DIR = _BASE / "data" / "processed" / "policy"
 MODEL_PATH = _BASE / "models" / "policy_cnn.pt"
 VALUE_MODEL_PATH = _BASE / "models" / "position_eval_cnn.pt"
 
+# 20M positions × 1088 bytes (int8) ≈ 21 GB — safe on 64 GB systems.
+# Increase with --max-positions if you have RAM headroom.
+DEFAULT_MAX_POSITIONS = 20_000_000
 
-def load_dataset():
+
+def load_dataset(max_positions: int = DEFAULT_MAX_POSITIONS):
+    paths = sorted(DATA_DIR.glob("*.npz"))
+    rng = np.random.default_rng(42)
+    order = rng.permutation(len(paths))   # shuffle so we sample varied years
+
     boards, moves = [], []
-    for npz_path in sorted(DATA_DIR.glob("*.npz")):
-        data = np.load(npz_path)
-        if len(data["moves"]) == 0:
+    total = 0
+    for i in order:
+        data = np.load(paths[i])
+        n = len(data["moves"])
+        if n == 0:
             continue
+        if total + n > max_positions:
+            take = max_positions - total
+            idx = np.sort(rng.choice(n, size=take, replace=False))
+            boards.append(data["boards"][idx])
+            moves.append(data["moves"][idx])
+            total += take
+            break
         boards.append(data["boards"])
         moves.append(data["moves"])
+        total += n
+
     if not boards:
         raise SystemExit(f"No data found in {DATA_DIR}")
+    print(f"Loaded {total:,} positions (cap={max_positions:,})")
     return np.concatenate(boards), np.concatenate(moves)
 
 
@@ -98,13 +119,15 @@ def main():
     ap.add_argument("--resume", action="store_true",
                     help="Load saved policy model and continue at half the LR")
     ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--max-positions", type=int, default=DEFAULT_MAX_POSITIONS,
+                    help=f"Cap on positions to load (default {DEFAULT_MAX_POSITIONS:,})")
     args = ap.parse_args()
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
 
     print(f"Loading dataset from {DATA_DIR.name}/...")
-    boards, moves = load_dataset()
+    boards, moves = load_dataset(args.max_positions)
     print(f"{len(moves):,} positions loaded")
 
     dataset = PolicyDataset(boards, moves)
