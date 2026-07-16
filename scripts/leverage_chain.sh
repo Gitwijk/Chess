@@ -13,8 +13,11 @@ P=.venv/bin/python
 mkdir -p logs
 
 echo "[chain] stage 1: train large policy net  $(date)"
+# --resume is a no-op on a fresh start but picks up the checkpoint after an
+# interrupted run (train_policy.py saves models/policy_cnn_large.pt every
+# time val_loss improves).
 $P -u src/train_policy.py --channels 192 --blocks 6 --policy-ch 64 \
-    --max-positions 28000000 --batch 1024 --lr 2e-4 --epochs 14 \
+    --max-positions 28000000 --batch 1024 --lr 2e-4 --epochs 14 --resume \
     --out models/policy_cnn_large.pt > logs/train_large.log 2>&1
 
 echo "[chain] stage 2: re-extract cheat features + sequences  $(date)"

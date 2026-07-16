@@ -233,6 +233,13 @@ def main():
             best_val_loss = val_loss
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
             no_improve = 0
+            # Checkpoint immediately: a killed run (shutdown, crash) resumes
+            # from the best epoch instead of losing everything.
+            tmp_dir = out_path.parent / "_tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            ckpt = tmp_dir / out_path.name
+            torch.save(best_state, ckpt)
+            ckpt.rename(out_path)
         else:
             no_improve += 1
             if no_improve >= patience:

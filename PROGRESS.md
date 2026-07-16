@@ -1,14 +1,26 @@
 # Project progress & handoff — 2026-07-16
 
-## Status: overnight chain RUNNING (soft-paused session)
+## Status: chain KILLED by machine shutdown — relaunch on next boot
 
-`scripts/leverage_chain.sh` is running detached as **PID 71522** (started
-2026-07-16 11:05 CEST). It survives terminal/session closure. Check on it:
+The chain (PID 71522) was running when the machine was shut down on
+2026-07-16 (~14:15 CEST, stage 1, epoch ~2/14). The interrupted run saved no
+checkpoint (that code landed just after), so stage 1 restarts from scratch.
+**To relaunch after boot:**
+
+```bash
+cd "/Users/g.j.klootwijk/Documents/Claude Code/chess-ml"
+nohup bash scripts/leverage_chain.sh > logs/chain.log 2>&1 &
+```
+
+The relaunched run IS shutdown-tolerant: train_policy.py now checkpoints
+`models/policy_cnn_large.pt` every time val_loss improves, and the chain
+passes `--resume`, so any future interruption resumes from the best epoch.
+
+Check on it:
 
 ```bash
 cat logs/chain.log                 # which stage is active
 tail -f logs/train_large.log       # stage 1 live progress
-ps -p 71522                        # chain alive?
 ```
 
 ### Chain stages (sequential, single GPU)
