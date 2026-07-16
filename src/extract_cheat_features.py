@@ -35,7 +35,6 @@ from mcts import encode_board, encode_move_idx, load_models  # noqa: E402
 DRIVE_DIR = Path("/Volumes/Google Drive/Data Science/Chess Data/Lichess/Lichess Elite Database")
 LOCAL_RAW_DIR = _BASE / "data" / "raw"
 PLAYERS_PATH = _BASE / "data" / "processed" / "players.parquet"
-OUT_PATH = _BASE / "data" / "processed" / "cheat_features.parquet"
 
 MIN_PLIES = 20          # skip very short games
 SKIP_OPENING_PLIES = 10  # opening theory moves match engines trivially
@@ -122,10 +121,21 @@ def game_features(game: chess.pgn.Game, policy_net, value_net, device) -> dict |
             "blunder_rate": float(np.mean(s < -0.15)),
         }
 
+    def seq(d: dict[str, list]) -> dict | None:
+        if len(d["rank"]) < 8:
+            return None
+        return {
+            "seq_rank": np.array(d["rank"], dtype=np.int16),
+            "seq_prob": np.array(d["prob"], dtype=np.float32),
+            "seq_swing": np.array(d["swing"], dtype=np.float32),
+        }
+
     w, b = agg(per_side[chess.WHITE]), agg(per_side[chess.BLACK])
     if w is None and b is None:
         return None
-    return {"white": w, "black": b}
+    return {"white": w, "black": b,
+            "white_seq": seq(per_side[chess.WHITE]),
+            "black_seq": seq(per_side[chess.BLACK])}
 
 
 def main():
@@ -134,7 +144,16 @@ def main():
                     help="Max games per labeled player (default 30)")
     ap.add_argument("--max-total", type=int, default=0,
                     help="Stop after this many feature rows (0 = no cap)")
+    ap.add_argument("--max-scan", type=int, default=0,
+                    help="Stop after scanning this many games (0 = no cap; for smoke tests)")
+    ap.add_argument("--sequences", action="store_true",
+                    help="Also write per-move sequences to <prefix>_sequences.parquet")
+    ap.add_argument("--out-prefix", default="cheat_features",
+                    help="Output filename prefix in data/processed/ (default cheat_features)")
     args = ap.parse_args()
+
+    out_path = _BASE / "data" / "processed" / f"{args.out_prefix}.parquet"
+    seq_path = _BASE / "data" / "processed" / f"{args.out_prefix}_sequences.parquet"
 
     players = pd.read_parquet(PLAYERS_PATH)
     players = players[players["found"]]
@@ -153,7 +172,9 @@ def main():
 
     games_per_player: dict[str, int] = defaultdict(int)
     rows: list[dict] = []
+    seq_rows: list[dict] = []
     n_scanned = 0
+    stop = False
 
     # Newest files first: labels are current account status, so recent games
     # are the most label-consistent (a 2015 game by a 2024-banned player may
@@ -184,13 +205,14 @@ def main():
                 if feats is None:
                     continue
 
-                for name, side_feats, is_white in (
-                        (white, feats["white"], True), (black, feats["black"], False)):
+                for name, side_feats, side_seq, is_white in (
+                        (white, feats["white"], feats["white_seq"], True),
+                        (black, feats["black"], feats["black_seq"], False)):
                     want = w_want if is_white else b_want
                     if not want or side_feats is None:
                         continue
                     games_per_player[name] += 1
-                    rows.append({
+                    meta = {
                         "player": name,
                         "label_tos": labels[name],
                         "title": titles.get(name),
@@ -200,23 +222,39 @@ def main():
                         "opp_elo": int(game.headers.get(
                             "BlackElo" if is_white else "WhiteElo", 0) or 0),
                         "source_file": pgn_path.stem,
-                        **side_feats,
-                    })
+                    }
+                    rows.append({**meta, **side_feats})
+                    if args.sequences and side_seq is not None:
+                        seq_rows.append({**meta, **side_seq})
+
+                if args.max_scan and n_scanned >= args.max_scan:
+                    stop = True
+                    break
 
         n_pos = sum(1 for r in rows if r["label_tos"])
         print(f"{pgn_path.stem}: {len(rows):,} rows "
               f"({n_pos:,} tos-labeled), {n_scanned:,} games scanned", flush=True)
 
         df = pd.DataFrame(rows)
-        tmp = OUT_PATH.parent / (OUT_PATH.name + ".tmp")
+        tmp = out_path.parent / (out_path.name + ".tmp")
         df.to_parquet(tmp)
-        tmp.rename(OUT_PATH)
+        tmp.rename(out_path)
+        if args.sequences:
+            sdf = pd.DataFrame(seq_rows)
+            tmp = seq_path.parent / (seq_path.name + ".tmp")
+            sdf.to_parquet(tmp)
+            tmp.rename(seq_path)
 
         if args.max_total and len(rows) >= args.max_total:
             print("Reached --max-total, stopping.")
             break
+        if stop:
+            print("Reached --max-scan, stopping.")
+            break
 
-    print(f"\nDone. {len(rows):,} feature rows → {OUT_PATH}")
+    print(f"\nDone. {len(rows):,} feature rows → {out_path}")
+    if args.sequences:
+        print(f"      {len(seq_rows):,} sequence rows → {seq_path}")
 
 
 if __name__ == "__main__":

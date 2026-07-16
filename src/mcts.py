@@ -176,8 +176,17 @@ class MCTS:
 # Model loading helpers
 # ---------------------------------------------------------------------------
 
-def load_models(device: torch.device):
-    """Load both CNN models from the standard model paths."""
+def _policy_arch_from_state(state: dict) -> tuple[int, int, int]:
+    """Infer (channels, n_blocks, policy_ch) from a PolicyCNN state dict."""
+    n_blocks = 1 + max(int(k.split(".")[1]) for k in state if k.startswith("body."))
+    channels = state["stem.3.weight"].shape[0]
+    policy_ch = state["policy_head.0.weight"].shape[0]
+    return channels, n_blocks, policy_ch
+
+
+def load_models(device: torch.device, policy_path: Optional[Path] = None):
+    """Load both CNN models. Prefers models/policy_cnn_large.pt when present;
+    the policy architecture is inferred from the checkpoint itself."""
     _base = Path(__file__).resolve().parent.parent
 
     # Import model classes from training scripts
@@ -186,8 +195,10 @@ def load_models(device: torch.device):
     from train_cnn import PositionEvalCNN
     from train_policy import PolicyCNN
 
-    value_path  = _base / "models" / "position_eval_cnn.pt"
-    policy_path = _base / "models" / "policy_cnn.pt"
+    value_path = _base / "models" / "position_eval_cnn.pt"
+    if policy_path is None:
+        large = _base / "models" / "policy_cnn_large.pt"
+        policy_path = large if large.exists() else _base / "models" / "policy_cnn.pt"
 
     if not value_path.exists():
         raise FileNotFoundError(f"Value model not found: {value_path}")
@@ -199,9 +210,11 @@ def load_models(device: torch.device):
         torch.load(value_path, map_location=device, weights_only=True))
     value_net = value_net.to(device).eval()
 
-    policy_net = PolicyCNN()
-    policy_net.load_state_dict(
-        torch.load(policy_path, map_location=device, weights_only=True))
+    policy_state = torch.load(policy_path, map_location=device, weights_only=True)
+    channels, n_blocks, policy_ch = _policy_arch_from_state(policy_state)
+    policy_net = PolicyCNN(channels, n_blocks, policy_ch)
+    policy_net.load_state_dict(policy_state)
     policy_net = policy_net.to(device).eval()
+    print(f"Policy: {policy_path.name} (channels={channels}, blocks={n_blocks})")
 
     return policy_net, value_net

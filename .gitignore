@@ -166,3 +166,7 @@ data/processed/
 models/*.pt
 models/*.pkl
 .DS_Store
+models/*.joblib
+models/_tmp/
+logs/
+data/
