@@ -1,20 +1,19 @@
 # Project progress & handoff — 2026-07-16
 
-## Status: chain KILLED by machine shutdown — relaunch on next boot
+## Status: chain RELAUNCHED 2026-08-23 (~11:55) as PID 34249
 
-The chain (PID 71522) was running when the machine was shut down on
-2026-07-16 (~14:15 CEST, stage 1, epoch ~2/14). The interrupted run saved no
-checkpoint (that code landed just after), so stage 1 restarts from scratch.
-**To relaunch after boot:**
+(History: first run killed by machine shutdown 2026-07-16 mid-stage-1 with
+no checkpoint; never relaunched until 2026-08-23.)
+
+This run IS shutdown-tolerant: train_policy.py checkpoints
+`models/policy_cnn_large.pt` every time val_loss improves, and the chain
+passes `--resume`, so an interruption resumes from the best epoch. If it
+gets killed again, relaunch with:
 
 ```bash
 cd "/Users/g.j.klootwijk/Documents/Claude Code/chess-ml"
 nohup bash scripts/leverage_chain.sh > logs/chain.log 2>&1 &
 ```
-
-The relaunched run IS shutdown-tolerant: train_policy.py now checkpoints
-`models/policy_cnn_large.pt` every time val_loss improves, and the chain
-passes `--resume`, so any future interruption resumes from the best epoch.
 
 Check on it:
 
