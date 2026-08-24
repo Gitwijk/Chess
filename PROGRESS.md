@@ -22,10 +22,19 @@ features backed up at `cheat_features_smallnet.parquet`.
 
 Bot sanity check still separates: bots 0.53 vs clean humans 0.02.
 
-### Stage 4 — strength vs Stockfish (UCI_LimitStrength, 300 sims/move)
-12W-0D-0L vs 1320; 12W-0D-0L vs 1600; 10W-1D-1L vs 1900 →
-**engine ≈ 2240 Elo** (refinement run vs 2200/2500 in
-`logs/strength_high.log`; games in `logs/strength_games.pgn`).
+### Stage 4 — strength vs Stockfish (UCI_LimitStrength, 300 sims/move, 0.05s/move SF)
+| SF level | W-D-L | Score | Implied engine Elo |
+|----------|-------|-------|--------------------|
+| 1320 | 12-0-0 | 1.00 | — |
+| 1600 | 12-0-0 | 1.00 | — |
+| 1900 | 10-1-1 | 0.88 | ~2240 |
+| 2200 | 8-1-3  | 0.71 | ~2350 |
+| 2500 | 8-3-1  | 0.79 | ~2730 |
+
+**Estimate: ≈2300–2500 under these conditions.** Caveats: 12 games/level
+(noisy); SF limited-strength calibration is unreliable at 0.05s/move
+(non-monotonic 2200 vs 2500 result shows it). A rigorous Elo needs longer
+time controls. Games: `logs/strength_games.pgn`.
 
 ## Full results overview (all committed, repo Gitwijk/Chess, main)
 
@@ -35,7 +44,7 @@ Bot sanity check still separates: bots 0.53 vs clean humans 0.02.
 | Value CNN (Stockfish labels, 17 planes) | 85.4% winner acc, val_loss 0.6147 |
 | Policy CNN small (128ch/3b, 20M pos) | 49.6% top-1 |
 | **Policy CNN large (192ch/6b, 28M pos)** | **54.7% top-1, 83.1% top-3, 91.8% top-5** |
-| MCTS engine + play CLI (`python src/play.py`) | **≈ 2240 Elo vs calibrated Stockfish** |
+| MCTS engine + play CLI (`python src/play.py`) | **≈2300–2500 Elo vs limited-strength Stockfish** |
 | Cheat detector (aggregate, large-net features) | **player AUC 0.787**, precision 0.73 @ 25% recall; bots 0.53 vs clean 0.02 |
 | Cheat detector (transformer on sequences) | player AUC 0.757 (aggregates win) |
 
