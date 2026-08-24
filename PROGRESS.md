@@ -1,61 +1,53 @@
-# Project progress & handoff — 2026-07-16
+# Project progress & handoff — 2026-08-24
 
-## Status: chain RELAUNCHED 2026-08-23 (~11:55) as PID 34249
+## Status: leverage chain COMPLETE (ALL DONE 2026-08-24 20:43)
 
-(History: first run killed by machine shutdown 2026-07-16 mid-stage-1 with
-no checkpoint; never relaunched until 2026-08-23.)
+All four stages ran clean on the 2026-08-23 relaunch. Results:
 
-This run IS shutdown-tolerant: train_policy.py checkpoints
-`models/policy_cnn_large.pt` every time val_loss improves, and the chain
-passes `--resume`, so an interruption resumes from the best epoch. If it
-gets killed again, relaunch with:
+### Stage 1 — large policy net (`models/policy_cnn_large.pt`)
+192ch / 6 ResBlocks / 21M params, 28M positions, 14 epochs:
+**top-1 54.7% / top-3 83.1% / top-5 91.8%** (small net: 49.6/78.4/88.3).
+MCTS auto-prefers this model.
 
-```bash
-cd "/Users/g.j.klootwijk/Documents/Claude Code/chess-ml"
-nohup bash scripts/leverage_chain.sh > logs/chain.log 2>&1 &
-```
+### Stage 2 — cheat features re-extracted with large net
+126,853 rows + per-move sequences (52 min uncontended). Small-net
+features backed up at `cheat_features_smallnet.parquet`.
 
-Check on it:
+### Stage 3 — detectors
+| Detector | Player AUC | Notes |
+|----------|-----------|-------|
+| Aggregate HistGBT, small-net feats (July) | 0.766 | precision 0.37 @ 51% recall |
+| **Aggregate HistGBT, large-net feats** | **0.787** | precision 0.56 @ 51% recall, 0.73 @ 25% |
+| Transformer on sequences | 0.757 | does NOT beat aggregates (honest negative) |
 
-```bash
-cat logs/chain.log                 # which stage is active
-tail -f logs/train_large.log       # stage 1 live progress
-```
+Bot sanity check still separates: bots 0.53 vs clean humans 0.02.
 
-### Chain stages (sequential, single GPU)
-| # | Stage | Log | Output | Est. |
-|---|-------|-----|--------|------|
-| 1 | Train large policy net (192ch/6blocks/21M params, 28M positions, 14 epochs, cosine LR) | `logs/train_large.log` | `models/policy_cnn_large.pt` | ~2h10m/epoch → ~30h total; early stop patience 4 |
-| 2 | Re-extract cheat features + per-move sequences with the large net (old features backed up to `cheat_features_smallnet.parquet` first) | `logs/cheat_seq.log` | `data/processed/cheat_features.parquet` + `cheat_features_sequences.parquet` | ~5h |
-| 3a | Retrain aggregate detector (HistGBT) | `logs/detector_largenet.log` | `models/cheat_detector.joblib` | minutes |
-| 3b | Train transformer detector on sequences | `logs/train_transformer.log` | `models/cheat_transformer.pt` | ~30 min |
-| 4 | Strength test vs Stockfish Elo ladder 1320/1600/1900, 12 games each | `logs/strength.log` | Elo estimate + `logs/strength_games.pgn` | ~2h |
+### Stage 4 — strength vs Stockfish (UCI_LimitStrength, 300 sims/move)
+12W-0D-0L vs 1320; 12W-0D-0L vs 1600; 10W-1D-1L vs 1900 →
+**engine ≈ 2240 Elo** (refinement run vs 2200/2500 in
+`logs/strength_high.log`; games in `logs/strength_games.pgn`).
 
-Stage 1 progress at pause time: epoch 1/14 done —
-`top1=0.4738 top3=0.7611 top5=0.8655` (small net needed 40 epochs for 49.6%).
-
-## Results so far (all committed, repo Gitwijk/Chess, main)
+## Full results overview (all committed, repo Gitwijk/Chess, main)
 
 | Component | Result |
 |-----------|--------|
 | Outcome baseline (HistGBT, Elo+ECO) | 57.6% |
 | Value CNN (Stockfish labels, 17 planes) | 85.4% winner acc, val_loss 0.6147 |
-| Policy CNN small (128ch/3blocks, 20M pos) | 49.6% top-1, 78.4% top-3, 88.3% top-5 |
-| MCTS engine + play CLI | works; self-play produces Najdorf theory (`python src/play.py`) |
-| Cheat detector (aggregate, small-net features) | player AUC 0.766, precision 0.73 @ 25% recall; bots 0.55 vs clean 0.02 |
+| Policy CNN small (128ch/3b, 20M pos) | 49.6% top-1 |
+| **Policy CNN large (192ch/6b, 28M pos)** | **54.7% top-1, 83.1% top-3, 91.8% top-5** |
+| MCTS engine + play CLI (`python src/play.py`) | **≈ 2240 Elo vs calibrated Stockfish** |
+| Cheat detector (aggregate, large-net features) | **player AUC 0.787**, precision 0.73 @ 25% recall; bots 0.53 vs clean 0.02 |
+| Cheat detector (transformer on sequences) | player AUC 0.757 (aggregates win) |
 
 Labels: 6,000 players via Lichess API → 389 tos_violation, 109 BOTs, 1,627
 disabled (excluded). `data/processed/players.parquet`.
 
-## When the chain finishes (next session TODO)
-1. Read the four stage logs; compare large-net top-1 vs 49.6% small-net.
-2. Compare detector AUCs: aggregate small-net (0.766) vs aggregate large-net
-   (`logs/detector_largenet.log`) vs transformer (`logs/train_transformer.log`).
-3. Read strength test summary (`logs/strength.log`) → engine Elo estimate.
-4. Update this file + memory, commit results summary to GitHub.
-5. Open ideas after that: value-head joint training with policy (shared
-   backbone), MCTS with batched leaf evaluation (much faster search),
-   opening win-rate analysis from games.parquet.
+## Open ideas (nothing running after the high-ladder finishes)
+- Value-head joint training with the large policy backbone (shared trunk).
+- MCTS batched leaf evaluation (much faster search → more sims → stronger).
+- Transformer detector: richer per-move features (eval delta vs best line,
+  time-per-move if available) before concluding sequences don't help.
+- Opening win-rate analysis from games.parquet (user interest noted).
 
 ## Gotchas (also in session memory)
 - Use `.venv/bin/python` (system python has no numpy/torch); `-u` for logs.
