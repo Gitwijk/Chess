@@ -176,17 +176,17 @@ class MCTS:
 # Model loading helpers
 # ---------------------------------------------------------------------------
 
-def _policy_arch_from_state(state: dict) -> tuple[int, int, int]:
-    """Infer (channels, n_blocks, policy_ch) from a PolicyCNN state dict."""
+def _trunk_arch_from_state(state: dict) -> tuple[int, int]:
+    """Infer (channels, n_blocks) from a stem+body state dict."""
     n_blocks = 1 + max(int(k.split(".")[1]) for k in state if k.startswith("body."))
     channels = state["stem.3.weight"].shape[0]
-    policy_ch = state["policy_head.0.weight"].shape[0]
-    return channels, n_blocks, policy_ch
+    return channels, n_blocks
 
 
-def load_models(device: torch.device, policy_path: Optional[Path] = None):
-    """Load both CNN models. Prefers models/policy_cnn_large.pt when present;
-    the policy architecture is inferred from the checkpoint itself."""
+def load_models(device: torch.device, policy_path: Optional[Path] = None,
+                value_path: Optional[Path] = None):
+    """Load both CNN models. Prefers the *_large.pt checkpoints when present;
+    each architecture is inferred from the checkpoint itself."""
     _base = Path(__file__).resolve().parent.parent
 
     # Import model classes from training scripts
@@ -195,26 +195,33 @@ def load_models(device: torch.device, policy_path: Optional[Path] = None):
     from train_cnn import PositionEvalCNN
     from train_policy import PolicyCNN
 
-    value_path = _base / "models" / "position_eval_cnn.pt"
-    if policy_path is None:
-        large = _base / "models" / "policy_cnn_large.pt"
-        policy_path = large if large.exists() else _base / "models" / "policy_cnn.pt"
+    def _pick(explicit: Optional[Path], large: str, small: str) -> Path:
+        if explicit is not None:
+            return explicit
+        large_path = _base / "models" / large
+        return large_path if large_path.exists() else _base / "models" / small
+
+    value_path = _pick(value_path, "position_eval_cnn_large.pt", "position_eval_cnn.pt")
+    policy_path = _pick(policy_path, "policy_cnn_large.pt", "policy_cnn.pt")
 
     if not value_path.exists():
         raise FileNotFoundError(f"Value model not found: {value_path}")
     if not policy_path.exists():
         raise FileNotFoundError(f"Policy model not found: {policy_path}")
 
-    value_net = PositionEvalCNN()
-    value_net.load_state_dict(
-        torch.load(value_path, map_location=device, weights_only=True))
+    value_state = torch.load(value_path, map_location=device, weights_only=True)
+    v_ch, v_blocks = _trunk_arch_from_state(value_state)
+    value_net = PositionEvalCNN(v_ch, v_blocks)
+    value_net.load_state_dict(value_state)
     value_net = value_net.to(device).eval()
+    print(f"Value : {value_path.name} (channels={v_ch}, blocks={v_blocks})")
 
     policy_state = torch.load(policy_path, map_location=device, weights_only=True)
-    channels, n_blocks, policy_ch = _policy_arch_from_state(policy_state)
-    policy_net = PolicyCNN(channels, n_blocks, policy_ch)
+    p_ch, p_blocks = _trunk_arch_from_state(policy_state)
+    policy_ch = policy_state["policy_head.0.weight"].shape[0]
+    policy_net = PolicyCNN(p_ch, p_blocks, policy_ch)
     policy_net.load_state_dict(policy_state)
     policy_net = policy_net.to(device).eval()
-    print(f"Policy: {policy_path.name} (channels={channels}, blocks={n_blocks})")
+    print(f"Policy: {policy_path.name} (channels={p_ch}, blocks={p_blocks})")
 
     return policy_net, value_net
