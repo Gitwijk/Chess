@@ -51,12 +51,44 @@ time controls. Games: `logs/strength_games.pgn`.
 Labels: 6,000 players via Lichess API → 389 tos_violation, 109 BOTs, 1,627
 disabled (excluded). `data/processed/players.parquet`.
 
-## Open ideas (nothing running after the high-ladder finishes)
-- Value-head joint training with the large policy backbone (shared trunk).
-- MCTS batched leaf evaluation (much faster search → more sims → stronger).
-- Transformer detector: richer per-move features (eval delta vs best line,
-  time-per-move if available) before concluding sequences don't help.
-- Opening win-rate analysis from games.parquet (user interest noted).
+## Next-steps plan (review 2026-08-25, nothing currently running)
+
+### Review findings that drive the priorities
+| Measurement | Value | Implication |
+|---|---|---|
+| Value net size | 0.98M params (128ch/3b) | **21× smaller than the policy net (21M)** — and it evaluates every MCTS leaf. Clear weakest link. |
+| Policy net | 21M params, 54.7% top-1 | At the supervised-learning ceiling; more data/size has diminishing returns. |
+| Batched inference | 0.15 ms/pos vs 1.35 ms at batch-1 | **9× speedup available**; MCTS currently runs batch-1 only. |
+| MCTS throughput | 205 sims/s (NN ≈ 54% of time) | Batching → realistically 2–3× more sims/s → stronger play. |
+| Eval data | 19.7M positions used = ALL extracted (5% sample of ~200M available) | Re-extract at ~8% → ~28M, matching the RAM cap. |
+| Policy data | 42.2M extracted, 28M used | 14M spare, but see ceiling above. |
+| Elo measurement | 12 games/level, SF at 0.05 s/move, non-monotonic | Too noisy to verify any improvement. Fix before optimising. |
+
+### Phase A — engine strength (main push, GPU-bound, sequential)
+1. **Better Elo yardstick first** (~1 h code). Without it we cannot tell whether
+   A2/A3 helped. Longer TC (0.5–1 s/move for SF), 30+ games/level, fixed opening
+   book for variety, report ±error bars. Runs unattended.
+2. **Scale the value net** (~30 min code + ~20–30 h train). Parameterise
+   `train_cnn.py` exactly like `train_policy.py` (channels/blocks/out/cosine LR/
+   checkpointing), then train 192ch/6b. Optionally re-extract evals at 8% first
+   (~5 h, CPU-only) for 28M positions. Proven recipe: the same scaling gave the
+   policy net +5.1 pp.
+3. **Batched MCTS** (~2 h code). Collect leaves per iteration with virtual loss,
+   one batched forward pass for policy+value. Verify with the A1 harness.
+
+### Phase B — cheap win, CPU-only (can run alongside Phase A)
+4. **Opening analysis** (~1–2 h). Win rates per ECO/variation from
+   `games.parquet` (24.9M games) split by Elo band and colour; deliver as a
+   ranked table + artifact. Long-standing user interest.
+
+### Phase C — optional / research (only if A plateaus)
+5. **Joint trunk, two heads** (~1 day). One backbone, value + policy heads,
+   alternating batches from the two datasets (they do NOT overlap: eval-DB
+   positions have no played move, game positions have no Stockfish score).
+   Payoff: one forward pass per node instead of two, plus shared features.
+6. **Cheat detector v2** (~half day). Richer per-move features — eval delta vs
+   the engine's best move (not just rank), phase tags, opponent-strength
+   context — before concluding sequence models don't help (v1: 0.757 vs 0.787).
 
 ## Gotchas (also in session memory)
 - Use `.venv/bin/python` (system python has no numpy/torch); `-u` for logs.
