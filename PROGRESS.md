@@ -90,6 +90,38 @@ disabled (excluded). `data/processed/players.parquet`.
    the engine's best move (not just rank), phase tags, opponent-strength
    context — before concluding sequence models don't help (v1: 0.757 vs 0.787).
 
+## Data inventory (after cleanup 2026-08-29: 29 GB -> 9.1 GB)
+
+Everything lives under `chess-ml/`. `data/` and `models/` are gitignored.
+
+| Path | Size | Regenerate with |
+|---|---|---|
+| `data/processed/policy/` (134 .npz) | 850 MB | `src/extract_policy.py` (~5 h) |
+| `data/processed/evals/` (99 shards) | 606 MB | `src/extract_evals.py` (~5 h, needs the .zst below) |
+| `data/processed/_parts/` | 352 MB | `src/parse_pgn.py` intermediates |
+| `data/processed/games.parquet` | 328 MB | `src/parse_pgn.py` (~1 h) |
+| `data/processed/cheat_features*.parquet` | 51 MB | `src/extract_cheat_features.py` (~1 h, GPU) |
+| `data/processed/{players,player_counts,opening_stats}.parquet` | 1.5 MB | API fetch / analysis scripts |
+| `models/` (6 checkpoints) | 137 MB | **NOT regenerable — days of GPU time** |
+| `.venv/` | 960 MB | `pip install` |
+
+**Source PGNs are never copied locally** — read straight from
+`/Volumes/Google Drive/Data Science/Chess Data/Lichess/Lichess Elite Database/`.
+
+**Deleted 2026-08-29** (both fully redundant, verified before removal):
+- `data/lichess_db_eval.jsonl.zst` (20 GB) — already extracted into
+  `evals/` (99 shards / 19,728,345 positions). Re-download if ever needed:
+  `curl -O https://database.lichess.org/lichess_db_eval.jsonl.zst`
+- `data/processed/positions/` (42 MB) — 12-plane game-outcome dataset,
+  superseded by `evals/`; incompatible with every current 17-plane model.
+
+**Known discrepancy (harmless, left in place):** `_parts/` (parsed 2026-06-15)
+holds 24,931,473 games vs 24,919,899 in `games.parquet` (merged 2026-06-26) —
+59 files short by ~0.03% each. Not duplicates. Most likely the Drive PGNs were
+updated between the two dates. `games.parquet` is the newer artifact and is
+what every downstream analysis used, so the difference is immaterial; `_parts/`
+was kept rather than deleted because the cause is not fully confirmed.
+
 ## Gotchas (also in session memory)
 - Use `.venv/bin/python` (system python has no numpy/torch); `-u` for logs.
 - `data/` fully gitignored (20 GB eval dump inside made `git add -A` hang).
