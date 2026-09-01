@@ -32,11 +32,14 @@ OUT_PATH = _BASE / "data" / "processed" / "players.parquet"
 
 API_URL = "https://lichess.org/api/users"
 BATCH = 300
-SLEEP_BETWEEN = 3.0     # be polite to the free API
+SLEEP_BETWEEN = 6.0     # be polite to the free API
 RETRY_429_WAIT = 65.0   # Lichess asks for a full minute after a 429
+MAX_ATTEMPTS = 8        # 4 was not enough: repeated 429s escalate the penalty
 
 
 def fetch_batch(usernames: list[str]) -> list[dict]:
+    """Fetch one batch. Returns None if the batch could not be fetched, so the
+    caller can save progress and stop cleanly instead of losing the run."""
     body = ",".join(usernames).encode()
     req = urllib.request.Request(
         API_URL, data=body,
@@ -44,21 +47,24 @@ def fetch_batch(usernames: list[str]) -> list[dict]:
                  "User-Agent": "chess-ml research script"},
         method="POST",
     )
-    for attempt in range(4):
+    for attempt in range(MAX_ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                print(f"  429 rate-limited, waiting {RETRY_429_WAIT}s...", flush=True)
-                time.sleep(RETRY_429_WAIT)
+                # Escalate: repeated violations extend the cool-off period.
+                wait = RETRY_429_WAIT * (attempt + 1)
+                print(f"  429 rate-limited, waiting {wait:.0f}s "
+                      f"(attempt {attempt + 1}/{MAX_ATTEMPTS})...", flush=True)
+                time.sleep(wait)
             else:
                 print(f"  HTTP {e.code}, retry {attempt + 1}...", flush=True)
-                time.sleep(10)
+                time.sleep(10 * (attempt + 1))
         except (urllib.error.URLError, TimeoutError) as e:
             print(f"  network error ({e}), retry {attempt + 1}...", flush=True)
-            time.sleep(10)
-    raise RuntimeError(f"Failed to fetch batch after retries (first user: {usernames[0]})")
+            time.sleep(10 * (attempt + 1))
+    return None
 
 
 def main():
@@ -71,6 +77,9 @@ def main():
                          "use player_counts_elo.parquet for the Elo-banded corpus)")
     ap.add_argument("--out", type=Path, default=OUT_PATH,
                     help="Output parquet (default data/processed/players.parquet)")
+    ap.add_argument("--stratify-elo", action="store_true",
+                    help="Sample evenly across 200-point Elo bands (needs a "
+                         "mean_elo column, as produced by scan_players.py)")
     args = ap.parse_args()
 
     out_path = args.out if args.out.is_absolute() else _BASE / args.out
@@ -79,18 +88,36 @@ def main():
     print(f"Pool: {len(pool):,} players with >= {args.min_games} games")
 
     rng = random.Random(42)
-    # Top-500 most active guaranteed in (lots of their games available),
-    # rest sampled randomly from the pool.
-    top = list(pool.index[:500])
-    rest = rng.sample(list(pool.index[500:]), min(args.sample - len(top), len(pool) - 500))
-    players = top + rest
+    if args.stratify_elo and "mean_elo" in pool.columns:
+        # Even coverage per rating band. Without this the sample follows the
+        # population, which is dominated by 1200-1800 and would leave too few
+        # labelled players at the extremes to evaluate per-band performance.
+        bands = (pool["mean_elo"] // 200 * 200).astype(int)
+        groups = {b: list(idx) for b, idx in pool.groupby(bands).groups.items()}
+        per_band = max(1, args.sample // len(groups))
+        players = []
+        for b in sorted(groups):
+            g = groups[b]
+            players.extend(rng.sample(g, min(per_band, len(g))))
+        rng.shuffle(players)
+        print(f"Stratified over {len(groups)} Elo bands, "
+              f"up to {per_band:,} players each")
+    else:
+        # Top-500 most active guaranteed in (lots of their games available),
+        # rest sampled randomly from the pool.
+        top = list(pool.index[:500])
+        rest = rng.sample(list(pool.index[500:]),
+                          min(args.sample - len(top), len(pool) - 500))
+        players = top + rest
     print(f"Querying {len(players):,} players in batches of {BATCH}...")
 
     # Resume support: skip players already fetched
     done: dict[str, dict] = {}
     if out_path.exists():
         prev = pd.read_parquet(out_path)
-        done = {r["username_queried"]: r for _, r in prev.iterrows()}
+        # to_dict("records") — iterrows() yields Series, and mixing those with
+        # the plain dicts appended below makes pd.DataFrame(rows) fail.
+        done = {r["username_queried"]: r for r in prev.to_dict("records")}
         print(f"Resuming: {len(done):,} already fetched")
 
     todo = [p for p in players if p not in done]
@@ -99,6 +126,11 @@ def main():
     for i in range(0, len(todo), BATCH):
         batch = todo[i:i + BATCH]
         users = fetch_batch(batch)
+        if users is None:
+            print(f"\nGiving up after {MAX_ATTEMPTS} attempts. "
+                  f"{len(rows):,} players saved to {out_path} — "
+                  f"re-run the same command later to resume.", flush=True)
+            break
         found = {u["id"].lower(): u for u in users}
         # API matches case-insensitively on id
         for name in batch:
