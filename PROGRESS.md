@@ -90,6 +90,53 @@ disabled (excluded). `data/processed/players.parquet`.
    the engine's best move (not just rank), phase tags, opponent-strength
    context — before concluding sequence models don't help (v1: 0.757 vs 0.787).
 
+## Cheat detector v2 (2026-09-01): timing + Elo-normalisation, and they interact
+
+Enabled by the ChessBase corpus on the MyPassport: ~84M Lichess games from
+April 2026, Elo 400–3594, **with `[%clk]` clock annotations**. Verified that
+the Lichess Elite PGNs carry NO clocks, so this signal was simply unavailable
+before. Data: 10,544 labelled players (215 banned, 167 BOTs), Elo-stratified;
+167,748 feature rows, 99.8% with usable clock data.
+
+**Ablation on one dataset — this is the clean comparison:**
+
+| Feature set | Player AUC |
+|---|---|
+| v1 baseline (move quality only) | 0.7483 |
+| + timing | 0.7599 |
+| + Elo-excess | 0.7536 |
+| **+ both (v2)** | **0.7998** |
+| play + time only (no Elo metadata) | 0.7136 |
+
+The two groups are **complementary**: together +0.052, versus +0.012 and +0.005
+alone. Knowing both "plays above their rating" and "thinking time does not
+track position difficulty" is far more discriminative than either signal by
+itself. `time_entropy_corr` lands as the #2 feature by permutation importance,
+confirming the hypothesis that motivated it.
+
+**Per Elo band** (the point of v2 — v1 only ever saw 2200+):
+800–1199 AUC 0.792 · 1200–1599 **0.888** · 1600–1999 0.819 ·
+2000–2399 0.672 · 2400–2799 **0.957**.
+
+**Bot control** (167 BOT accounts, never in training): bot-vs-clean AUC
+**0.9419**; the average bot outranks 94.2% of clean players. Note the *absolute*
+scores are tiny (median 0.0005) because the positive rate here is 1.9% vs 8.6%
+in v1 — comparing mean scores across datasets is misleading, so ranking is
+reported instead.
+
+**Honest caveats:**
+- v2's 0.7998 is **not** comparable to v1's 0.787: different corpora, different
+  test sets (39 vs 77 positives). Only the ablation above is apples-to-apples.
+- Removing Elo metadata costs 0.086 AUC (0.7998 → 0.7136). A meaningful share
+  of the signal is rating *volatility* (`elo_std` is the top feature), which is
+  a legitimate but non-behavioural cue. Pure play+time still clears 0.71.
+- Precision at 51% recall is only 0.077, far below v1's 0.557 — again a base-rate
+  effect (1.9% positives). At 10% recall precision is 1.000.
+
+**Side finding — ban rate is U-shaped:** 3.7% at 400–599, a trough of 1.3%
+around 1800, rising again to 3.4% at 2600+. Likely sandbagging at the bottom
+and engine use at the top. v1 could not see this at all.
+
 ## Value-net A/B (2026-09-01): scaling the value net does NOT help
 
 Pre-registered test: does the 4.2M-param value net beat the 0.98M one in

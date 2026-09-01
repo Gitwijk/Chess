@@ -13,6 +13,7 @@ Usage:
     python src/train_cheat_detector.py
 """
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -111,8 +112,16 @@ def player_auc_for(df: pd.DataFrame, cols: list[str], seed: int = 42):
 
 
 def main():
-    df = pd.read_parquet(FEATURES_PATH)
-    print(f"{len(df):,} game rows, {df['player'].nunique():,} players")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--features", type=Path, default=FEATURES_PATH,
+                    help="Feature parquet (default data/processed/cheat_features.parquet)")
+    ap.add_argument("--out", type=Path, default=_BASE / "models" / "cheat_detector.joblib",
+                    help="Where to save the player-level model")
+    args = ap.parse_args()
+
+    df = pd.read_parquet(args.features)
+    print(f"{args.features.name}: {len(df):,} game rows, "
+          f"{df['player'].nunique():,} players")
 
     bots = df[df["title"] == "BOT"]
     df = df[df["title"] != "BOT"].copy()
@@ -150,6 +159,13 @@ def main():
     if has_timing:
         groups["+ both (v2)"] = FEATURE_COLS + TIMING_COLS + EXCESS_COLS
 
+    # Can it work from PLAY alone? Rating volatility (elo_std) is a legitimate
+    # but non-behavioural signal, so report the model without it separately.
+    play_only = [c for c in FEATURE_COLS if c not in ("elo", "opp_elo")]
+    if has_timing:
+        play_only = play_only + TIMING_COLS
+    play_only = play_only + EXCESS_COLS
+
     print("\n=== Ablation (player-level ROC-AUC) ===")
     results = {}
     for name, cols in groups.items():
@@ -157,6 +173,8 @@ def main():
         results[name] = auc
         print(f"  {name:<16} {auc:.4f}")
     best_name = max(results, key=lambda k: results[k])
+    auc_play, *_ = player_auc_for(df, play_only)
+    print(f"  {'play+time only':<16} {auc_play:.4f}   (no Elo metadata)")
     print(f"  best: {best_name}")
 
     # ---------------- Full model ----------------
@@ -198,19 +216,28 @@ def main():
         bot_agg = bot_agg.reindex(columns=agg.columns, fill_value=0.0).fillna(0.0)
         bot_scores = clf_p.predict_proba(bot_agg[feat_cols_p].values)[:, 1]
         human_scores = clf_p.predict_proba(Xp[te_m])[:, 1]
-        print(f"\nBot sanity check ({len(bot_agg)} bots):")
-        print(f"  mean bot score   : {bot_scores.mean():.3f}")
-        print(f"  mean human score : {human_scores[yp[te_m] == 0].mean():.3f}")
-        print(f"  mean cheater score: {human_scores[yp[te_m] == 1].mean():.3f}")
+        clean_scores = human_scores[yp[te_m] == 0]
+        # Report RANKING, not raw probability: absolute scores scale with the
+        # positive base rate, so mean-score comparisons mislead across datasets.
+        pct = float(np.mean([(clean_scores < b).mean() for b in bot_scores]))
+        bot_auc = roc_auc_score(
+            np.r_[np.ones(len(bot_scores)), np.zeros(len(clean_scores))],
+            np.r_[bot_scores, clean_scores])
+        print(f"\nBot sanity check ({len(bot_agg)} bots, never seen in training):")
+        print(f"  bot vs clean-human AUC : {bot_auc:.4f}")
+        print(f"  average bot outranks   : {pct:.1%} of clean players")
+        print(f"  median score — bot {np.median(bot_scores):.4f} | "
+              f"clean {np.median(clean_scores):.4f} | "
+              f"banned {np.median(human_scores[yp[te_m] == 1]):.4f}")
 
     # ---------------- Persist player-level model ----------------
     import joblib
-    model_dir = _BASE / "models"
-    tmp_dir = model_dir / "_tmp"
+    out = args.out if args.out.is_absolute() else _BASE / args.out
+    tmp_dir = out.parent / "_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir / "cheat_detector.joblib"
-    joblib.dump({"model": clf_p, "feature_cols": feat_cols_p}, tmp)
-    out = model_dir / "cheat_detector.joblib"
+    tmp = tmp_dir / out.name
+    joblib.dump({"model": clf_p, "feature_cols": feat_cols_p,
+                 "elo_baseline": baseline, "feature_group": best_name}, tmp)
     tmp.rename(out)
     print(f"\nSaved player-level model to {out}")
 
