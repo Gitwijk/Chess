@@ -66,9 +66,15 @@ def main():
     ap.add_argument("--sample", type=int, default=6000,
                     help="Number of players to sample (default 6000)")
     ap.add_argument("--min-games", type=int, default=20)
+    ap.add_argument("--counts", type=Path, default=COUNTS_PATH,
+                    help="Player-counts parquet (default data/processed/player_counts.parquet; "
+                         "use player_counts_elo.parquet for the Elo-banded corpus)")
+    ap.add_argument("--out", type=Path, default=OUT_PATH,
+                    help="Output parquet (default data/processed/players.parquet)")
     args = ap.parse_args()
 
-    counts = pd.read_parquet(COUNTS_PATH)
+    out_path = args.out if args.out.is_absolute() else _BASE / args.out
+    counts = pd.read_parquet(args.counts)
     pool = counts[counts["n_games"] >= args.min_games]
     print(f"Pool: {len(pool):,} players with >= {args.min_games} games")
 
@@ -82,8 +88,8 @@ def main():
 
     # Resume support: skip players already fetched
     done: dict[str, dict] = {}
-    if OUT_PATH.exists():
-        prev = pd.read_parquet(OUT_PATH)
+    if out_path.exists():
+        prev = pd.read_parquet(out_path)
         done = {r["username_queried"]: r for _, r in prev.iterrows()}
         print(f"Resuming: {len(done):,} already fetched")
 
@@ -114,15 +120,15 @@ def main():
               f"(tos_violation={n_tos}, disabled={n_dis})", flush=True)
 
         df = pd.DataFrame(rows)
-        tmp = OUT_PATH.parent / (OUT_PATH.name + ".tmp")
+        tmp = out_path.parent / (out_path.name + ".tmp")
         df.to_parquet(tmp)
-        tmp.rename(OUT_PATH)
+        tmp.rename(out_path)
 
         if i + BATCH < len(todo):
             time.sleep(SLEEP_BETWEEN)
 
     df = pd.DataFrame(rows)
-    print(f"\nDone. {len(df):,} players → {OUT_PATH}")
+    print(f"\nDone. {len(df):,} players → {out_path}")
     print(f"  tos_violation : {df['tos_violation'].sum():,}")
     print(f"  disabled      : {df['disabled'].sum():,}")
     print(f"  bots          : {(df['title'] == 'BOT').sum():,}")
