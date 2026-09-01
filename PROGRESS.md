@@ -90,9 +90,43 @@ disabled (excluded). `data/processed/players.parquet`.
    the engine's best move (not just rank), phase tags, opponent-strength
    context — before concluding sequence models don't help (v1: 0.757 vs 0.787).
 
+## Value-net A/B (2026-09-01): scaling the value net does NOT help
+
+Pre-registered test: does the 4.2M-param value net beat the 0.98M one in
+actual play? Identical conditions — same opening book, same policy net, 30
+games at each of SF 1900/2200/2500, only the value checkpoint differs.
+
+| Value net | W-D-L (90 games) | Score | Combined Elo |
+|---|---|---|---|
+| Large (192ch/6b, 4.2M) | 51-12-27 | 0.633 | **2312** |
+| Small (128ch/3b, 0.98M) | 47-21-22 | 0.639 | **2309** |
+
+Difference: **-4.2 Elo, z = -0.08**, 95% CI on the score difference
+[-0.146, +0.135]. Indistinguishable — the small net even scored marginally
+higher, which is pure noise. Per the rule fixed before running: **scaling the
+value net from 0.98M to 4.2M parameters buys no measurable playing strength.**
+Third honest negative in this project, after the sequence detector (0.757 vs
+0.787) and the opening analysis (+0.32%).
+
+Worth knowing: detecting a genuine 20-Elo difference at this score level needs
+~4,700 games, so this harness can only ever resolve large effects.
+
+Why it likely doesn't help: at 300 simulations the tree is shallow and the
+policy priors dominate move selection, and the value task itself was already
+near its ceiling (val_loss 0.6147 -> 0.6129, a 0.3% gain). **The lever for
+strength is more simulations (batched MCTS), not bigger nets.**
+
+Side benefit: both runs agree on ~2310 Elo, tightening the earlier, noisier
+"2300-2500" estimate.
+
 ## Data inventory (after cleanup 2026-08-29: 29 GB -> 9.1 GB)
 
-Everything lives under `chess-ml/`. `data/` and `models/` are gitignored.
+**Moved 2026-09-01** to `/Volumes/My Passport Pro/chess-ml/`, with `data` and
+`models` as symlinks inside the project — no code path changed. Verified
+byte-exact (2,435,474,007 bytes) and by SHA-256 on all six checkpoints.
+`.gitignore` needed `/data` and `/models`: the existing patterns match paths
+*inside* those directories, not the symlinks themselves. Scripts fail with a
+clear `FileNotFoundError` when the drive is not mounted.
 
 | Path | Size | Regenerate with |
 |---|---|---|
