@@ -170,3 +170,8 @@ models/*.joblib
 models/_tmp/
 logs/
 data/
+
+# data/ and models/ are symlinks to the external drive; the patterns above
+# match directories and paths *inside* them, not the symlinks themselves.
+/data
+/models

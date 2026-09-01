@@ -105,13 +105,25 @@ def main():
                     help="Adjudicate as draw beyond this many plies")
     ap.add_argument("--label", default="",
                     help="Tag written into the PGN Event header (e.g. 'large-value-net')")
+    ap.add_argument("--value-model", type=Path, default=None,
+                    help="Value checkpoint to use (default: prefer *_large.pt). "
+                         "Set explicitly to A/B two checkpoints under identical conditions.")
+    ap.add_argument("--policy-model", type=Path, default=None,
+                    help="Policy checkpoint to use (default: prefer *_large.pt)")
     args = ap.parse_args()
 
     levels = [int(x) for x in args.elo_list.split(",")]
     n_games = args.games + (args.games % 2)   # keep color-paired
 
+    def _resolve(p: Path | None) -> Path | None:
+        if p is None:
+            return None
+        return p if p.is_absolute() else _BASE / p
+
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    policy_net, value_net = load_models(device)
+    policy_net, value_net = load_models(device,
+                                        policy_path=_resolve(args.policy_model),
+                                        value_path=_resolve(args.value_model))
     engine = MCTS(policy_net, value_net, device)
     print(f"MCTS engine ready ({args.sims} sims/move, device {device})")
     print(f"{n_games} games/level, SF {args.sf_movetime}s/move, "
