@@ -16,7 +16,6 @@ Usage:
 """
 
 import argparse
-import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -31,24 +30,12 @@ _BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BASE / "src"))
 
 from mcts import encode_board, encode_move_idx, load_models  # noqa: E402
+from pgn_source import add_source_args, find_pgn_files  # noqa: E402
 
-DRIVE_DIR = Path("/Volumes/Google Drive/Data Science/Chess Data/Lichess/Lichess Elite Database")
-LOCAL_RAW_DIR = _BASE / "data" / "raw"
 PLAYERS_PATH = _BASE / "data" / "processed" / "players.parquet"
 
 MIN_PLIES = 20          # skip very short games
 SKIP_OPENING_PLIES = 10  # opening theory moves match engines trivially
-STEM_RE = re.compile(r"^lichess_elite_\d{4}-\d{2}$")  # monthly files only, no merged dupes
-
-
-def pgn_files() -> list[Path]:
-    local = {p.stem: p for p in LOCAL_RAW_DIR.glob("lichess_elite_*.pgn")
-             if STEM_RE.match(p.stem)}
-    drive = {}
-    if DRIVE_DIR.exists():
-        drive = {p.stem: p for p in DRIVE_DIR.glob("lichess_elite_*.pgn")
-                 if STEM_RE.match(p.stem) and p.stem not in local}
-    return sorted((local | drive).values())
 
 
 @torch.no_grad()
@@ -58,17 +45,31 @@ def game_features(game: chess.pgn.Game, policy_net, value_net, device) -> dict |
     if len(moves) < MIN_PLIES:
         return None
 
-    # Encode every position (before each move) in one batch
+    # Encode every position (before each move) in one batch. Clock readings are
+    # collected in the same pass: node.clock() is the mover's REMAINING time
+    # after the move, so time spent = previous remaining - current + increment.
     board = game.board()
     boards_np, move_idxs, legal_lists, turns = [], [], [], []
+    clocks: list[float | None] = []
+    node = game
     for move in moves:
         boards_np.append(encode_board(board))
         move_idxs.append(encode_move_idx(board, move))
         legal_lists.append([encode_move_idx(board, m) for m in board.legal_moves])
         turns.append(board.turn)
+        node = node.variations[0] if node.variations else node
+        clocks.append(node.clock())
         board.push(move)
     # Final position too (for the last move's value swing)
     boards_np.append(encode_board(board))
+
+    increment = 0.0
+    tc = game.headers.get("TimeControl", "")
+    if "+" in tc:
+        try:
+            increment = float(tc.split("+")[1])
+        except ValueError:
+            pass
 
     batch = torch.from_numpy(np.stack(boards_np)).to(device)
     policy_logits = policy_net(batch[:-1]).cpu().numpy()          # (n_moves, 4096)
@@ -96,11 +97,23 @@ def game_features(game: chess.pgn.Game, policy_net, value_net, device) -> dict |
 
         played_pos = int(np.where(leg == move_idx)[0][0])
         rank = int((probs > probs[played_pos]).sum())  # 0 = engine's top choice
+        # Position difficulty: entropy of the policy over legal moves. Low
+        # entropy = one obvious move; high = many plausible ones. Humans spend
+        # longer on high-entropy positions, engine users do not.
+        entropy = float(-(probs * np.log(probs + 1e-12)).sum())
+        # Time spent on this move (None when the PGN carries no clock data).
+        spent = None
+        if clocks[i] is not None:
+            prev = clocks[i - 2] if i >= 2 else None
+            if prev is not None:
+                spent = max(0.0, prev - clocks[i] + increment)
         d = per_side[turn]
         d["rank"].append(rank)
         d["top1"].append(rank == 0)
         d["top3"].append(rank < 3)
         d["prob"].append(float(probs[played_pos]))
+        d["entropy"].append(entropy)
+        d["time"].append(np.nan if spent is None else spent)
         # swing from mover's perspective: positive = position improved
         swing = values_white[i + 1] - values_white[i]
         d["swing"].append(swing if turn == chess.WHITE else -swing)
@@ -109,9 +122,13 @@ def game_features(game: chess.pgn.Game, policy_net, value_net, device) -> dict |
         if len(d["rank"]) < 8:
             return None
         r = np.array(d["rank"]); p = np.array(d["prob"]); s = np.array(d["swing"])
-        return {
+        t = np.array(d["time"], dtype=np.float64)
+        e = np.array(d["entropy"], dtype=np.float64)
+        top1 = np.array(d["top1"], dtype=bool)
+
+        out = {
             "n_moves": len(r),
-            "top1_rate": float(np.mean(d["top1"])),
+            "top1_rate": float(np.mean(top1)),
             "top3_rate": float(np.mean(d["top3"])),
             "mean_rank": float(r.mean()),
             "median_rank": float(np.median(r)),
@@ -119,7 +136,32 @@ def game_features(game: chess.pgn.Game, policy_net, value_net, device) -> dict |
             "mean_swing": float(s.mean()),
             "worst_swing": float(s.min()),
             "blunder_rate": float(np.mean(s < -0.15)),
+            "mean_entropy": float(e.mean()),
         }
+
+        # --- Timing features (NaN when the PGN carries no clock data) ---
+        ok = ~np.isnan(t)
+        if ok.sum() >= 8:
+            tv, ev, t1 = t[ok], e[ok], top1[ok]
+            mean_t = float(tv.mean())
+            out["mean_time"] = mean_t
+            out["std_time"] = float(tv.std())
+            # Humans think longer in complex positions; engine users show a flat
+            # curve. This correlation is the classic behavioural tell.
+            out["time_entropy_corr"] = (
+                float(np.corrcoef(tv, ev)[0, 1])
+                if tv.std() > 1e-9 and ev.std() > 1e-9 else 0.0)
+            # Engine's top move played unusually fast, relative to this player's
+            # own pace in this game (self-normalised, so time control cancels).
+            fast = tv < 0.5 * mean_t if mean_t > 0 else np.zeros_like(tv, bool)
+            out["fast_top1_rate"] = float(np.mean(t1 & fast))
+            # Consistency: engine users often show low variation in pace.
+            out["time_cv"] = float(tv.std() / mean_t) if mean_t > 1e-9 else np.nan
+        else:
+            for k in ("mean_time", "std_time", "time_entropy_corr",
+                      "fast_top1_rate", "time_cv"):
+                out[k] = np.nan
+        return out
 
     def seq(d: dict[str, list]) -> dict | None:
         if len(d["rank"]) < 8:
@@ -128,6 +170,8 @@ def game_features(game: chess.pgn.Game, policy_net, value_net, device) -> dict |
             "seq_rank": np.array(d["rank"], dtype=np.int16),
             "seq_prob": np.array(d["prob"], dtype=np.float32),
             "seq_swing": np.array(d["swing"], dtype=np.float32),
+            "seq_time": np.array(d["time"], dtype=np.float32),
+            "seq_entropy": np.array(d["entropy"], dtype=np.float32),
         }
 
     w, b = agg(per_side[chess.WHITE]), agg(per_side[chess.BLACK])
@@ -150,12 +194,18 @@ def main():
                     help="Also write per-move sequences to <prefix>_sequences.parquet")
     ap.add_argument("--out-prefix", default="cheat_features",
                     help="Output filename prefix in data/processed/ (default cheat_features)")
+    ap.add_argument("--players", type=Path, default=PLAYERS_PATH,
+                    help="Labeled-player parquet (default data/processed/players.parquet)")
+    ap.add_argument("--exclude-bullet", action="store_true",
+                    help="Skip bullet games: with ~1s per move the timing features "
+                         "are mostly noise there")
+    add_source_args(ap)
     args = ap.parse_args()
 
     out_path = _BASE / "data" / "processed" / f"{args.out_prefix}.parquet"
     seq_path = _BASE / "data" / "processed" / f"{args.out_prefix}_sequences.parquet"
 
-    players = pd.read_parquet(PLAYERS_PATH)
+    players = pd.read_parquet(args.players)
     players = players[players["found"]]
     # exclude closed accounts with unknown reason; keep tos_violation + clean
     players = players[players["tos_violation"] | ~players["disabled"]]
@@ -179,7 +229,7 @@ def main():
     # Newest files first: labels are current account status, so recent games
     # are the most label-consistent (a 2015 game by a 2024-banned player may
     # well be clean).
-    for pgn_path in reversed(pgn_files()):
+    for pgn_path in reversed(find_pgn_files(args.pgn_dir, args.pattern)):
         with open(pgn_path, encoding="utf-8", errors="replace") as f:
             while True:
                 # Fast path: parse headers only; movetext is skipped unless
@@ -194,6 +244,8 @@ def main():
                 w_want = white in wanted and games_per_player[white] < args.max_games
                 b_want = black in wanted and games_per_player[black] < args.max_games
                 if not (w_want or b_want):
+                    continue
+                if args.exclude_bullet and "Bullet" in headers.get("Event", ""):
                     continue
 
                 f.seek(offset)
@@ -221,6 +273,8 @@ def main():
                             "WhiteElo" if is_white else "BlackElo", 0) or 0),
                         "opp_elo": int(game.headers.get(
                             "BlackElo" if is_white else "WhiteElo", 0) or 0),
+                        "time_control": game.headers.get("TimeControl", ""),
+                        "event": game.headers.get("Event", ""),
                         "source_file": pgn_path.stem,
                     }
                     rows.append({**meta, **side_feats})

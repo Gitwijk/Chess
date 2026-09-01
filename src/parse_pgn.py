@@ -1,6 +1,6 @@
 """Parse Lichess Elite PGN files into a single parquet file of per-game metadata."""
 
-import re
+import argparse
 import sys
 import time
 from multiprocessing import Pool
@@ -9,10 +9,12 @@ from pathlib import Path
 import chess.pgn
 import pandas as pd
 
-DRIVE_DIR = Path("/Volumes/Google Drive/Data Science/Chess Data/Lichess/Lichess Elite Database")
-LOCAL_RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
-OUT_PATH = Path(__file__).resolve().parent.parent / "data" / "processed" / "games.parquet"
-PARTS_DIR = Path(__file__).resolve().parent.parent / "data" / "processed" / "_parts"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pgn_source import add_source_args, find_pgn_files  # noqa: E402
+
+_BASE = Path(__file__).resolve().parent.parent
+OUT_PATH = _BASE / "data" / "processed" / "games.parquet"
+PARTS_DIR = _BASE / "data" / "processed" / "_parts"
 
 FIELDS = [
     "Event", "White", "Black", "Result", "WhiteElo", "BlackElo",
@@ -66,25 +68,21 @@ def parse_file(pgn_path: Path) -> Path:
     return part_path
 
 
-STEM_RE = re.compile(r"^lichess_elite_\d{4}-\d{2}$")
+# File discovery (including the stem filter) now lives in pgn_source.py.
 
 
 def main():
-    # Prefer local copies (more reliable than the network drive); fall back to the drive.
-    # Skip stray duplicates (e.g. "lichess_elite_2021-06 2.pgn").
-    local_files = {p.stem: p for p in LOCAL_RAW_DIR.glob("lichess_elite_*.pgn") if STEM_RE.match(p.stem)}
-    drive_files = {}
-    if DRIVE_DIR.exists():
-        drive_files = {
-            p.stem: p for p in DRIVE_DIR.glob("lichess_elite_*.pgn")
-            if STEM_RE.match(p.stem) and p.stem not in local_files
-        }
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_source_args(ap)
+    ap.add_argument("--out", type=Path, default=OUT_PATH,
+                    help="Output parquet path (default data/processed/games.parquet)")
+    args = ap.parse_args()
 
-    pgn_files = sorted((local_files | drive_files).values())
-    if not pgn_files:
-        sys.exit("No PGN files found in data/raw/ or the Google Drive folder")
+    pgn_files = find_pgn_files(args.pgn_dir, args.pattern)
+    out_path = args.out if args.out.is_absolute() else _BASE / args.out
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     PARTS_DIR.mkdir(parents=True, exist_ok=True)
 
     n_workers = 6
@@ -93,8 +91,8 @@ def main():
         part_paths = pool.map(parse_file, pgn_files)
 
     df = pd.concat((pd.read_parquet(p) for p in part_paths), ignore_index=True)
-    df.to_parquet(OUT_PATH, index=False)
-    print(f"\nWrote {len(df):,} games to {OUT_PATH}")
+    df.to_parquet(out_path, index=False)
+    print(f"\nWrote {len(df):,} games to {out_path}")
 
 
 if __name__ == "__main__":

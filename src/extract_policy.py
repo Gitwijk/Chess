@@ -11,8 +11,9 @@ Run:
     python src/extract_policy.py
 """
 
+import argparse
 import random
-import re
+import sys
 import time
 from multiprocessing import Pool
 from pathlib import Path
@@ -21,12 +22,12 @@ import chess
 import chess.pgn
 import numpy as np
 
-DRIVE_DIR = Path("/Volumes/Google Drive/Data Science/Chess Data/Lichess/Lichess Elite Database")
-LOCAL_RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pgn_source import add_source_args, find_pgn_files  # noqa: E402
+
 OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "processed" / "policy"
 
 SAMPLE_RATE = 0.02  # 2% of ~25M games -> ~500K games -> ~20M positions
-STEM_RE = re.compile(r"^lichess_elite_\d{4}-\d{2}$")
 
 PIECE_TO_PLANE = {
     (chess.PAWN,   chess.WHITE): 0, (chess.KNIGHT, chess.WHITE): 1,
@@ -119,17 +120,12 @@ def process_file(pgn_path: Path) -> Path:
 
 
 def main():
-    local_files = {p.stem: p for p in LOCAL_RAW_DIR.glob("lichess_elite_*.pgn")
-                   if STEM_RE.match(p.stem)}
-    drive_files = {}
-    if DRIVE_DIR.exists():
-        drive_files = {
-            p.stem: p for p in DRIVE_DIR.glob("lichess_elite_*.pgn")
-            if STEM_RE.match(p.stem) and p.stem not in local_files
-        }
-    pgn_files = sorted((local_files | drive_files).values())
-    if not pgn_files:
-        raise SystemExit("No PGN files found in data/raw/ or Google Drive")
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_source_args(ap)
+    args = ap.parse_args()
+
+    pgn_files = find_pgn_files(args.pgn_dir, args.pattern)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
