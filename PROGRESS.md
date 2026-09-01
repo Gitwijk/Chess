@@ -90,6 +90,47 @@ disabled (excluded). `data/processed/players.parquet`.
    the engine's best move (not just rank), phase tags, opponent-strength
    context — before concluding sequence models don't help (v1: 0.757 vs 0.787).
 
+## Batched MCTS + tree reuse (2026-09-01): +247 Elo, the prediction held
+
+The value-net A/B said the lever was search, not model size. Tested directly.
+
+**Engineering.** Leaves are collected in groups and evaluated in ONE forward
+pass per net; virtual loss (pushing an in-flight node's own-perspective Q
+toward 1, which is what makes it unattractive to its parent) keeps parallel
+descents off one branch; terminal positions skip the network. The tree now
+also survives between moves — re-rooting into the subtree under the played
+line is free extra search, and storing per-node Q in that node's own
+perspective is what makes re-rooting sound.
+
+| | sims/move | time/move | throughput |
+|---|---|---|---|
+| Before (batch 1) | 300 | 1.38 s | 212 sims/s |
+| After (batch 64) | **3000** | **1.23 s** | **4197 sims/s** |
+
+**Strength, identical harness (same book, levels, SF time):**
+
+| | W-D-L (90 games) | Score | Elo |
+|---|---|---|---|
+| 300 sims, batch 1 | 51-12-27 | 0.633 | 2312 |
+| 3000 sims, batch 64 | **71-15-4** | **0.872** | **2559** |
+
+**+247 Elo, z = +3.87** (95% CI on the score difference [+0.118, +0.360]) —
+comfortably significant, unlike the value-net scaling which gave z = -0.08.
+That works out to roughly **+74 Elo per doubling of simulations**, in line
+with published AlphaZero-family numbers. Zero losses against SF 2200.
+
+Correctness was verified before the speed claim: root visits reconcile with
+children, no invalid Q, mate-in-1 found, and batch 16/32/64 choose the SAME
+move as unbatched in 8/8 test positions — virtual-loss distortion is
+negligible at these sim counts.
+
+**Caveats.** The three levels disagree (2412 / 2525 / 2741), so SF's
+limited-strength calibration is clearly not linear; the combined 2559 is a
+mean over a wide spread. We are also nearing the harness ceiling — at 0.95
+against SF 1900 the Elo formula becomes unstable. **A real claim at this
+level needs a better yardstick** (Lichess bot account, or CCRL-rated
+opponents) before "GM level" is asserted.
+
 ## Cheat detector v2 (2026-09-01): timing + Elo-normalisation, and they interact
 
 Enabled by the ChessBase corpus on the MyPassport: ~84M Lichess games from
