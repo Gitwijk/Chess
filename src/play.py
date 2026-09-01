@@ -95,6 +95,9 @@ def main():
     ap.add_argument("--side", choices=["white", "black", "random"], default="white")
     ap.add_argument("--sims", type=int, default=400,
                     help="MCTS simulations per engine move (default 400)")
+    ap.add_argument("--batch", type=int, default=32,
+                    help="MCTS leaves evaluated per forward pass "
+                         "(1 = unbatched; higher is faster)")
     ap.add_argument("--fen", default=chess.STARTING_FEN,
                     help="Starting FEN (default: standard starting position)")
     ap.add_argument("--c-puct", type=float, default=1.4,
@@ -104,7 +107,7 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Loading models (device: {device})...", end=" ", flush=True)
     policy_net, value_net = load_models(device)
-    engine = MCTS(policy_net, value_net, device, c_puct=args.c_puct)
+    engine = MCTS(policy_net, value_net, device, c_puct=args.c_puct, batch_size=args.batch)
     print("ready.\n")
 
     side = args.side

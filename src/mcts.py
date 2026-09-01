@@ -63,6 +63,7 @@ class MCTSNode:
     visit_count: int = 0
     value_sum: float = 0.0
     children: dict = field(default_factory=dict)   # chess.Move → MCTSNode
+    is_expanded: bool = False   # distinguishes "never evaluated" from "terminal"
 
     @property
     def Q(self) -> float:
@@ -81,79 +82,162 @@ class MCTSNode:
 # ---------------------------------------------------------------------------
 
 class MCTS:
+    """Batched PUCT search with virtual loss and tree reuse.
+
+    Leaves are collected in groups and evaluated in ONE forward pass per net:
+    at batch 1 a position costs ~1.35 ms, in a batch of 200 ~0.15 ms, so the
+    batching is worth ~9x on the network side. Virtual loss keeps the parallel
+    descents from all piling onto the same branch.
+
+    The tree also survives between moves: after our move and the opponent's
+    reply, the subtree below that line already carries visits, and re-rooting
+    into it is free extra search. Per-node Q is stored in that node's own
+    side-to-move perspective, which is what makes re-rooting sound.
+    """
+
+    # Pretend a node in flight already lost, so other descents in the same
+    # batch avoid it. A node's Q is its own perspective, and the parent selects
+    # on (1 - childQ), so "looks bad to the parent" means pushing childQ to 1.
+    VIRTUAL_LOSS = 1.0
+
     def __init__(self, policy_net: nn.Module, value_net: nn.Module,
-                 device: torch.device, c_puct: float = 1.4):
+                 device: torch.device, c_puct: float = 1.4,
+                 batch_size: int = 16):
         self.policy = policy_net.eval()
         self.value  = value_net.eval()
         self.device = device
         self.c_puct = c_puct
+        self.batch_size = batch_size
+        self._root: Optional[MCTSNode] = None
+        self._root_stack: Optional[list] = None
+        self._root_origin: Optional[str] = None   # EPD of the game's start
+        self.last_reused = 0        # visits inherited by the last search
 
-    def _tensor(self, board: chess.Board) -> torch.Tensor:
-        arr = encode_board(board)
-        return torch.from_numpy(arr).unsqueeze(0).to(self.device)
+    # -- tree reuse ---------------------------------------------------------
 
-    def _expand(self, node: MCTSNode, board: chess.Board) -> None:
-        """Run policy head; assign priors to all legal child nodes."""
+    def reset(self) -> None:
+        """Drop the retained tree (call between games)."""
+        self._root, self._root_stack, self._root_origin = None, None, None
+
+    def _get_root(self, board: chess.Board) -> MCTSNode:
+        """Re-root into the retained tree when this board continues it.
+
+        A matching move prefix alone is not sufficient: two games started from
+        different FENs can share one. Comparing the starting position as well
+        makes "same game, further along" exact.
+        """
+        stack = list(board.move_stack)
+        origin = board.root().epd()
+        if (self._root is not None and self._root_stack is not None
+                and origin == self._root_origin
+                and len(stack) >= len(self._root_stack)
+                and stack[:len(self._root_stack)] == self._root_stack):
+            node = self._root
+            for move in stack[len(self._root_stack):]:
+                node = node.children.get(move)
+                if node is None:
+                    break
+            if node is not None and node.is_expanded:
+                self.last_reused = node.visit_count
+                self._root, self._root_stack = node, stack
+                return node
+        self.last_reused = 0
+        self._root, self._root_stack, self._root_origin = MCTSNode(), stack, origin
+        return self._root
+
+    # -- evaluation ---------------------------------------------------------
+
+    @torch.no_grad()
+    def _evaluate(self, boards: list[chess.Board]):
+        """One batched forward pass per net for a list of positions."""
+        batch = torch.from_numpy(
+            np.stack([encode_board(b) for b in boards])).to(self.device)
+        logits = self.policy(batch).cpu().numpy()
+        values = torch.sigmoid(self.value(batch)).cpu().numpy()
+        return logits, values
+
+    def _expand_from_logits(self, node: MCTSNode, board: chess.Board,
+                            logits: np.ndarray) -> None:
+        """Assign priors to all legal children from a precomputed policy row."""
         legal = list(board.legal_moves)
-        if not legal:
-            return
-        with torch.no_grad():
-            logits = self.policy(self._tensor(board))[0].cpu().numpy()
+        if legal:
+            idx = np.array([encode_move_idx(board, m) for m in legal])
+            leg = logits[idx]
+            leg = leg - leg.max()               # numerical stability
+            priors = np.exp(leg)
+            priors /= priors.sum()
+            for move, prior in zip(legal, priors):
+                node.children[move] = MCTSNode(prior=float(prior))
+        node.is_expanded = True
 
-        indices = np.array([encode_move_idx(board, m) for m in legal])
-        leg_logits = logits[indices]
-        leg_logits -= leg_logits.max()          # numerical stability
-        priors = np.exp(leg_logits)
-        priors /= priors.sum()
+    # -- search -------------------------------------------------------------
 
-        for move, prior in zip(legal, priors):
-            node.children[move] = MCTSNode(prior=float(prior))
+    def _descend(self, root: MCTSNode, board: chess.Board):
+        """Walk to a leaf, applying virtual loss along the way."""
+        node, path = root, [root]
+        sim_board = board.copy(stack=False)
+        while node.is_expanded and node.children:
+            move = max(node.children,
+                       key=lambda m: node.children[m].puct(node.visit_count, self.c_puct))
+            node = node.children[move]
+            sim_board.push(move)
+            path.append(node)
+        for nd in path:
+            nd.visit_count += 1
+            nd.value_sum += self.VIRTUAL_LOSS
+        return path, sim_board, node
 
-    def _leaf_value(self, board: chess.Board) -> float:
-        """Win probability for the side to move at this board."""
-        if board.is_checkmate():
-            return 0.0   # side to move is in checkmate → 0
-        if board.is_game_over():
-            return 0.5   # draw
-        with torch.no_grad():
-            logit = self.value(self._tensor(board)).item()
-        return torch.sigmoid(torch.tensor(logit)).item()
+    @staticmethod
+    def _backprop(path: list[MCTSNode], value: float, virtual_loss: float) -> None:
+        """Undo the virtual loss, then apply the real value.
+
+        path[0]=root … path[-1]=leaf. The value flips at each level: the leaf
+        gets `value` in its own perspective, its parent gets `1 - value`.
+        """
+        for nd in path:
+            nd.visit_count -= 1
+            nd.value_sum -= virtual_loss
+        for i, nd in enumerate(reversed(path)):
+            nd.visit_count += 1
+            nd.value_sum += value if i % 2 == 0 else (1.0 - value)
 
     def search(self, board: chess.Board, n_simulations: int = 400) -> chess.Move:
-        """Run MCTS and return the best move."""
-        root = MCTSNode()
-        self._expand(root, board)
-        root.visit_count = 1
+        """Run MCTS and return the most-visited move."""
+        root = self._get_root(board)
 
-        for _ in range(n_simulations):
-            node = root
-            sim_board = board.copy(stack=False)
-            path = [node]
+        if not root.is_expanded:
+            logits, values = self._evaluate([board])
+            self._expand_from_logits(root, board, logits[0])
+            root.visit_count += 1
+            root.value_sum += float(values[0])
 
-            # --- Selection ---
-            while node.children and node.visit_count > 1:
-                best_move = max(
-                    node.children,
-                    key=lambda m: node.children[m].puct(node.visit_count, self.c_puct),
-                )
-                node = node.children[best_move]
-                sim_board.push(best_move)
-                path.append(node)
+        # n_simulations is NEW work per move; inherited visits are a bonus on
+        # top. Subtracting them instead would let a large reused tree reduce
+        # the search to nothing and play on stale statistics.
+        remaining = n_simulations
+        while remaining > 0:
+            n = min(self.batch_size, remaining)
+            leaves = [self._descend(root, board) for _ in range(n)]
 
-            # --- Expansion (if not terminal and not yet expanded) ---
-            if not node.children and not sim_board.is_game_over():
-                self._expand(node, sim_board)
+            # Terminal positions need no network call — keep them out of the batch.
+            pending = [(p, b, nd) for p, b, nd in leaves if not b.is_game_over()]
+            logits = values = None
+            if pending:
+                logits, values = self._evaluate([b for _, b, _ in pending])
 
-            # --- Evaluation ---
-            value = self._leaf_value(sim_board)
-
-            # --- Backpropagation ---
-            # path[0]=root ... path[-1]=leaf
-            # Flip value at each alternating level: leaf gets `value`,
-            # parent gets `1-value` (opponent's perspective), etc.
-            for i, n in enumerate(reversed(path)):
-                n.visit_count += 1
-                n.value_sum += value if i % 2 == 0 else (1.0 - value)
+            k = 0
+            for path, sim_board, node in leaves:
+                if sim_board.is_game_over():
+                    # Checkmate is a loss for the side to move; anything else a draw.
+                    value = 0.0 if sim_board.is_checkmate() else 0.5
+                    node.is_expanded = True
+                else:
+                    if not node.is_expanded:
+                        self._expand_from_logits(node, sim_board, logits[k])
+                    value = float(values[k])
+                    k += 1
+                self._backprop(path, value, self.VIRTUAL_LOSS)
+            remaining -= n
 
         if not root.children:
             raise ValueError("No legal moves from this position")

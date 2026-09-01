@@ -65,6 +65,7 @@ def play_game(engine: MCTS, sf: chess.engine.SimpleEngine, sims: int,
               we_are_white: bool, max_plies: int, sf_movetime: float,
               opening: list[str]) -> tuple[float, chess.pgn.Game]:
     """Returns (our score: 1/0.5/0, game record)."""
+    engine.reset()   # never carry a retained tree across games
     board = chess.Board()
     for uci in opening:
         board.push(chess.Move.from_uci(uci))
@@ -99,6 +100,9 @@ def main():
     ap.add_argument("--games", type=int, default=30,
                     help="Games per level (rounded up to an even number)")
     ap.add_argument("--sims", type=int, default=300, help="MCTS simulations per move")
+    ap.add_argument("--batch", type=int, default=32,
+                    help="MCTS leaves evaluated per forward pass "
+                         "(1 = unbatched; higher is faster)")
     ap.add_argument("--sf-movetime", type=float, default=0.3,
                     help="Stockfish seconds per move (default 0.3)")
     ap.add_argument("--max-plies", type=int, default=220,
@@ -124,7 +128,7 @@ def main():
     policy_net, value_net = load_models(device,
                                         policy_path=_resolve(args.policy_model),
                                         value_path=_resolve(args.value_model))
-    engine = MCTS(policy_net, value_net, device)
+    engine = MCTS(policy_net, value_net, device, batch_size=args.batch)
     print(f"MCTS engine ready ({args.sims} sims/move, device {device})")
     print(f"{n_games} games/level, SF {args.sf_movetime}s/move, "
           f"{len(OPENING_BOOK)} book lines\n")
